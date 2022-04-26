@@ -1,1 +1,3 @@
-# dito
+# Dito
+
+The CLI text editor
