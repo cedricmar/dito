@@ -1,59 +1,119 @@
 package ui
 
 import (
+	"bytes"
 	"fmt"
 	"os"
+	"strings"
+
+	"github.com/cedricmar/editor/pkg/viewmodel"
 )
 
-type coord struct {
-	row, col int
+type Screen struct {
+	view *viewmodel.View
+	buf  *bytes.Buffer
 }
 
-type State struct {
-	cursorPos coord
-	winSize   coord
-	status    string
-}
-
-func NewUI(r, c int) *State {
-	return &State{
-		cursorPos: coord{row: 0, col: 0},
-		winSize:   coord{row: r, col: c},
-		status:    "<C-x> to exit",
+func NewUI() *Screen {
+	return &Screen{
+		buf: bytes.NewBuffer([]byte{}),
 	}
 }
 
-func (s *State) Paint() {
-	s.ClearScreen()
+func (s *Screen) ListenUpdates(upChan <-chan *viewmodel.View) {
+	go func() {
+		for updatedView := range upChan {
+			s.view = updatedView
+			s.Paint()
+		}
+	}()
+}
+
+func (s *Screen) Paint() {
+	s.buf.Reset()
+	s.showCursor(false)
+	s.moveCursor(0, 0)
+
 	s.drawRows()
 
-	s.moveCursor(1, 1)
+	s.moveCursor(s.view.Cursor.X, s.view.Cursor.Y)
+	s.showCursor(true)
+
+	s.buf.WriteTo(os.Stdout)
 }
 
-func (s *State) ClearScreen() {
-	os.Stdout.Write([]byte("\x1b[2J")) // Empty screen
-	s.moveCursor(1, 1)
+func (s *Screen) ClearScreen() {
+	s.buf.Reset()
+	s.moveCursor(0, 0)
+	s.buf.WriteString("\x1b[2J") // Empty screen
+	s.buf.WriteTo(os.Stdout)
 }
 
-func (s *State) moveCursor(row, col int) {
-	cmd := fmt.Sprintf("\x1b[%d;%dH", row, col)
-	os.Stdout.Write([]byte(cmd))
-}
-
-func (s *State) drawRows() {
-	for y := 1; y < s.winSize.row; y++ {
-		if y == s.winSize.row-1 {
-			fmt.Fprintf(
-				os.Stdout,
-				" %d %d / %d %d | %s\r\n",
-				s.cursorPos.col,
-				s.cursorPos.row,
-				s.winSize.col,
-				s.winSize.row,
-				s.status,
-			)
-			continue
+func (s *Screen) drawRows() {
+	for y := 1; y < s.view.Viewport.Height; y++ {
+		s.clearLine()
+		if y < s.view.Viewport.Height-1 {
+			s.buf.WriteString("~")
+			if y == s.view.Viewport.Height/3 {
+				s.drawWelcome()
+			}
+			s.buf.WriteString("\r\n")
+		} else {
+			s.drawStatusBar()
 		}
-		os.Stdout.Write([]byte("~\r\n"))
 	}
+}
+
+func (s *Screen) drawWelcome() {
+	w := fmt.Sprintf("Dito editor -- version %s", "0.0.1")
+	wlen := len(w)
+	if wlen > s.view.Viewport.Width-1 {
+		wlen = s.view.Viewport.Width - 1
+	}
+	padLen := (s.view.Viewport.Width - wlen) / 2
+	pad := ""
+	if padLen > 0 {
+		pad = strings.Repeat(" ", padLen-1)
+	}
+
+	b := make([]byte, len(pad)+wlen)
+	copy(b, pad+w)
+	s.buf.Write(b)
+}
+
+func (s *Screen) clearLine() {
+	s.buf.WriteString("\x1b[2K")
+}
+
+func (s *Screen) clearLineFromCursor() {
+	s.buf.WriteString("\x1b[K")
+}
+
+func (s *Screen) clearLineBeforeCursor() {
+	s.buf.WriteString("\x1b[1K")
+}
+
+func (s *Screen) drawStatusBar() {
+	ib := s.view.Infobar
+	fmt.Fprintf(s.buf, "%s | %d:%d %d:%d | debug: %s",
+		ib.Status,
+		s.view.Cursor.X,
+		s.view.Cursor.Y,
+		s.view.Viewport.Width,
+		s.view.Viewport.Height,
+		s.view.Infobar.Debug,
+	)
+}
+
+func (s *Screen) moveCursor(x, y int) {
+	fmt.Fprintf(s.buf, "\x1b[%d;%dH", y+1, x+1)
+}
+
+func (s *Screen) showCursor(show bool) {
+	if show {
+		s.buf.WriteString("\x1b[?25h")
+		return
+	}
+	s.buf.WriteString("\x1b[?25l")
+
 }

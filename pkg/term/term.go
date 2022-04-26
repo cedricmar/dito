@@ -1,8 +1,13 @@
 package term
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"strconv"
+	"strings"
 
 	"golang.org/x/sys/unix"
 )
@@ -19,15 +24,19 @@ func GetTermState() (*TermState, error) {
 	if err != nil {
 		return nil, err
 	}
-	w, err := getWinsize(stdinFD)
+
+	ts := &TermState{
+		InitialTermios: tcopy(*t),
+		Termios:        t,
+	}
+
+	ws, err := ts.getWinsize(stdinFD)
 	if err != nil {
 		return nil, err
 	}
-	return &TermState{
-		InitialTermios: tcopy(*t),
-		Termios:        t,
-		Winsize:        w,
-	}, nil
+	ts.Winsize = ws
+
+	return ts, nil
 }
 
 func (t *TermState) SetTermios() error {
@@ -62,15 +71,123 @@ func (t *TermState) Print() {
 	fmt.Printf("Termios: %+v - Winsize: %+v\r\n", t.Termios, t.Winsize)
 }
 
+func (t *TermState) getWinsize(fd int) (*unix.Winsize, error) {
+	ws, err := unix.IoctlGetWinsize(fd, uint(unix.TIOCGWINSZ))
+	if ws == nil || err != nil {
+		// Fallback in case IoctlGetWinsize fails
+		t.RawMode()
+
+		os.Stdout.Write([]byte("\x1b[999C\x1b[999B"))
+		c, r, err := getCursorPosition()
+		if err != nil {
+			return nil, err
+		}
+
+		t.Reset()
+
+		ws = &unix.Winsize{
+			Row: uint16(r),
+			Col: uint16(c),
+		}
+	}
+	return ws, err
+}
+
+func getCursorPosition() (col, row int, err error) {
+	os.Stdout.Write([]byte("\x1b[6n")) // Print cursor pos
+
+	buf := make([]byte, 32)
+	i := 0
+	for i < len(buf)-1 {
+		b := make([]byte, 1)
+		_, err = os.Stdin.Read(b)
+		if err != nil {
+			return
+		}
+		buf[i] = b[0]
+		if buf[i] == []byte("R")[0] {
+			break
+		}
+		i++
+	}
+	buf[i] = []byte("\x00")[0]
+
+	if buf[0] != []byte("\x1b")[0] || buf[1] != []byte("[")[0] {
+		err = errors.New("wrong format")
+		return
+	}
+
+	reader := bytes.NewReader(buf[2:])
+	n, err := fmt.Fscanf(reader, "%d;%d", &row, &col)
+	if n != 2 || err != nil {
+		err = errors.New("wrong format")
+	}
+	return
+}
+
 func getTermios(fd int) (*unix.Termios, error) {
 	return unix.IoctlGetTermios(fd, uint(unix.TIOCGETA))
 }
 
-func getWinsize(fd int) (*unix.Winsize, error) {
-	// @TODO - write a fallback in case IoctlGetWinsize fails
-	return unix.IoctlGetWinsize(fd, uint(unix.TIOCGWINSZ))
-}
-
 func tcopy(t unix.Termios) *unix.Termios {
 	return &t
+}
+
+// err := getSttyState(&originalSttyState)
+// if err != nil {
+// 	log.Fatal(err)
+// }
+// defer setSttyState(&originalSttyState)
+
+// setSttyState(bytes.NewBufferString("cbreak"))
+// setSttyState(bytes.NewBufferString("-echo"))
+
+// var b []byte = make([]byte, 1)
+// for {
+// 	os.Stdin.Read(b)
+// 	fmt.Printf("Read character: %s\n", b)
+// }
+
+/*
+	err = exec.Command("stty", "-F", "/dev/tty", "cbreak", "min", "1").Run()
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(3)
+	}
+	// do not display entered characters on the screen
+	exec.Command("stty", "-F", "/dev/tty", "-echo").Run()
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(2)
+	}*/
+
+func getSttyState(state *bytes.Buffer) (err error) {
+	cmd := exec.Command("stty", "-g")
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = state
+	return cmd.Run()
+}
+
+func setSttyState(state *bytes.Buffer) (err error) {
+	cmd := exec.Command("stty", state.String())
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	return cmd.Run()
+}
+
+func Bold(str string) string {
+	return "\033[1m" + str + "\033[0m"
+}
+
+func progress(current, total, cols int) string {
+	prefix := strconv.Itoa(current) + " / " + strconv.Itoa(total)
+	bar_start := " ["
+	bar_end := "] "
+
+	bar_size := cols - len(prefix+bar_start+bar_end)
+	amount := int(float32(current) / (float32(total) / float32(bar_size)))
+	remain := bar_size - amount
+
+	bar := strings.Repeat("X", amount) + strings.Repeat(" ", remain)
+	return Bold(prefix) + bar_start + bar + bar_end
 }
